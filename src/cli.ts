@@ -86,10 +86,7 @@ let hookQueue: IPCMessage[] = [];  // Queue hooks while prompting
 let currentPromptInfo: { type: string; input?: any } | null = null;  // Track current prompt
 
 function printHeader(): void {
-  console.log(chalk.bold.cyan(`
-  ╔════════════════════════════════════════════════╗
-  ║       OpenCode Hook Inspector                    ║
-  ╚════════════════════════════════════════════════╝`));
+  console.log(chalk.bold.cyan('\n  OpenCode Hook Inspector\n'));
 }
 
 function displayHook(msg: IPCMessage): void {
