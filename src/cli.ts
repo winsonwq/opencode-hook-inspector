@@ -77,6 +77,8 @@ let buffer = '';
 let hookHistory: Array<{ hook: string; timestamp?: string }> = [];
 let isPrompting = false;
 let pendingRl: readline.Interface | null = null;
+let hookQueue: IPCMessage[] = [];  // Queue hooks while prompting
+let currentPromptInfo: { type: string; input?: any } | null = null;  // Track current prompt
 
 function printHeader(): void {
   console.log(chalk.bold.cyan(`
@@ -122,18 +124,38 @@ function displayHook(msg: IPCMessage): void {
   console.log(chalk.dim('─'.repeat(60)));
 }
 
+function flushHookQueue(): void {
+  if (hookQueue.length === 0) return;
+
+  console.log(chalk.dim(`\n  ── Queued ${hookQueue.length} hook(s) during prompt ──\n`));
+
+  for (const queuedMsg of hookQueue) {
+    displayHook(queuedMsg);
+  }
+  hookQueue = [];
+}
+
 function handleMessage(msg: IPCMessage): void {
   if (msg.type === 'hook_event') {
     const hook = msg.hook as string;
+
+    // If prompting is active, queue this hook for later
+    if (isPrompting && hook !== currentPromptInfo?.type) {
+      hookQueue.push(msg);
+      return;
+    }
+
     displayHook(msg);
-    
+
     // Handle permission.asked with interactive reply
     if (hook === 'permission.asked' && msg.canReply) {
       const input = msg.input as { permissionId: string; sessionId: string; permission: string; patterns: string[] };
       if (input?.permissionId) {
+        currentPromptInfo = { type: 'permission.asked', input };
         promptForPermissionReply(input);
       }
     } else if (msg.canInjectContext) {
+      currentPromptInfo = { type: 'context.inject' };
       promptForContext();
     }
   }
@@ -167,6 +189,8 @@ function promptForPermissionReply(input: { permissionId: string; sessionId: stri
       console.log(chalk.green(`  [Auto-Replying: ${autoReplyOption.toUpperCase()}]`));
       sendPermissionReply(input.permissionId, input.sessionId, autoReplyOption);
       isPrompting = false;
+      currentPromptInfo = null;
+      flushHookQueue();
     }, 500);
     return;
   }
@@ -181,7 +205,7 @@ function promptForPermissionReply(input: { permissionId: string; sessionId: stri
     pendingRl = null;
 
     let reply: string = 'ask';
-    
+
     switch (answer.trim()) {
       case '1': reply = 'once'; break;
       case '2': reply = 'always'; break;
@@ -196,6 +220,8 @@ function promptForPermissionReply(input: { permissionId: string; sessionId: stri
     sendPermissionReply(input.permissionId, input.sessionId, reply);
 
     isPrompting = false;
+    currentPromptInfo = null;
+    flushHookQueue();
   });
 }
 
@@ -232,6 +258,8 @@ function promptForContext(): void {
     }
 
     isPrompting = false;
+    currentPromptInfo = null;
+    flushHookQueue();
   });
 }
 
