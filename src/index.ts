@@ -1,6 +1,8 @@
 // Hook Inspector Plugin for OpenCode
 import net from 'net';
 import fs from 'fs';
+import { loadConfig, applyHookConfig } from './config.js';
+import type { OHIConfig } from './types.js';
 
 const SOCKET_PATH = process.env.OHI_SOCKET || '/tmp/ohi.sock';
 const DEBUG_FILE = '/tmp/ohi-debug.log';
@@ -21,6 +23,7 @@ let socket: net.Socket | null = null;
 let buffer = '';
 let pendingContext: string[] = [];
 let connectionReady: Promise<net.Socket | null> | null = null;
+let ohiConfig: OHIConfig = {};
 
 let pendingPermissionReplies: Map<string, { sessionId: string; chosen: string }> = new Map();
 let pendingPermissionRequests: Set<string> = new Set();
@@ -103,6 +106,10 @@ function applyPermissionStatus(output: any, chosen: string) {
 export const HookInspector = async (_ctx: any) => {
   // Capture client for API calls
   opencodeClient = _ctx?.client;
+
+  // Load OHI config
+  ohiConfig = loadConfig();
+  debugLog(`[OHI] Config loaded, hooks: ${JSON.stringify(Object.keys(ohiConfig.hooks || {}))}`);
 
   function connect(): Promise<net.Socket> {
     return new Promise((resolve, reject) => {
@@ -299,5 +306,214 @@ export const HookInspector = async (_ctx: any) => {
       applyPermissionStatus(output, chosen);
       debugLog(`[OHI] permission.ask: output.status set to ${output.status}`);
     },
+
+    // Chat message hook
+    "chat.message": async (input: any, output: any) => {
+      sendMessage({
+        type: 'hook_event',
+        hook: 'chat.message',
+        input: {
+          sessionID: input.sessionID,
+          agent: input.agent,
+          model: input.model,
+        },
+        output: {
+          hasMessage: Boolean(output.message),
+          hasParts: Boolean(output.parts?.length),
+          partsCount: output.parts?.length || 0,
+        },
+        timestamp: new Date().toISOString(),
+      });
+
+      // Apply config-based modifications
+      applyHookConfig('chat.message', output, ohiConfig);
+    },
+
+    // Chat params hook - modify LLM parameters
+    "chat.params": async (input: any, output: any) => {
+      sendMessage({
+        type: 'hook_event',
+        hook: 'chat.params',
+        input: {
+          sessionID: input.sessionID,
+          agent: input.agent,
+        },
+        output: {
+          temperature: output.temperature,
+          topP: output.topP,
+          topK: output.topK,
+          maxOutputTokens: output.maxOutputTokens,
+          options: output.options,
+        },
+        timestamp: new Date().toISOString(),
+      });
+
+      // Apply config-based modifications
+      applyHookConfig('chat.params', output, ohiConfig);
+    },
+
+    // Chat headers hook - modify HTTP headers
+    "chat.headers": async (input: any, output: any) => {
+      sendMessage({
+        type: 'hook_event',
+        hook: 'chat.headers',
+        input: {
+          sessionID: input.sessionID,
+          agent: input.agent,
+        },
+        output: {
+          headers: output.headers,
+        },
+        timestamp: new Date().toISOString(),
+      });
+
+      // Apply config-based modifications
+      applyHookConfig('chat.headers', output, ohiConfig);
+    },
+
+    // Command execute before hook
+    "command.execute.before": async (input: any, output: any) => {
+      sendMessage({
+        type: 'hook_event',
+        hook: 'command.execute.before',
+        input: {
+          command: input.command,
+          sessionID: input.sessionID,
+          arguments: input.arguments,
+        },
+        output: {
+          hasParts: Boolean(output.parts?.length),
+          partsCount: output.parts?.length || 0,
+        },
+        timestamp: new Date().toISOString(),
+      });
+
+      // Apply config-based modifications
+      applyHookConfig('command.execute.before', output, ohiConfig);
+    },
+
+    // Tool execute after hook
+    "tool.execute.after": async (input: any, output: any) => {
+      sendMessage({
+        type: 'hook_event',
+        hook: 'tool.execute.after',
+        input: {
+          tool: input.tool,
+          sessionID: input.sessionID,
+          callID: input.callID,
+          args: input.args,
+        },
+        output: {
+          title: output.title,
+          output: output.output,
+          hasMetadata: Boolean(output.metadata),
+        },
+        timestamp: new Date().toISOString(),
+      });
+
+      // Apply config-based modifications
+      applyHookConfig('tool.execute.after', output, ohiConfig);
+    },
+
+    // Tool definition hook - modify tool description and parameters
+    "tool.definition": async (input: any, output: any) => {
+      sendMessage({
+        type: 'hook_event',
+        hook: 'tool.definition',
+        input: {
+          toolID: input.toolID,
+        },
+        output: {
+          description: output.description,
+          parameters: output.parameters,
+        },
+        timestamp: new Date().toISOString(),
+      });
+
+      // Apply config-based modifications
+      applyHookConfig('tool.definition', output, ohiConfig);
+    },
+
+    // Experimental chat messages transform hook
+    "experimental.chat.messages.transform": async (input: any, output: any) => {
+      const messageCount = output.messages?.length || 0;
+      sendMessage({
+        type: 'hook_event',
+        hook: 'experimental.chat.messages.transform',
+        input: {},
+        output: {
+          messageCount,
+        },
+        timestamp: new Date().toISOString(),
+      });
+
+      // Apply config-based modifications
+      applyHookConfig('experimental.chat.messages.transform', output, ohiConfig);
+    },
+
+    // Experimental chat system transform hook - modify system prompt
+    "experimental.chat.system.transform": async (input: any, output: any) => {
+      const systemCount = output.system?.length || 0;
+      sendMessage({
+        type: 'hook_event',
+        hook: 'experimental.chat.system.transform',
+        input: {
+          sessionID: input.sessionID,
+          model: input.model,
+        },
+        output: {
+          systemCount,
+          system: output.system,
+        },
+        timestamp: new Date().toISOString(),
+      });
+
+      // Apply config-based modifications
+      applyHookConfig('experimental.chat.system.transform', output, ohiConfig);
+    },
+
+    // Experimental compaction autocontinue hook
+    "experimental.compaction.autocontinue": async (input: any, output: any) => {
+      sendMessage({
+        type: 'hook_event',
+        hook: 'experimental.compaction.autocontinue',
+        input: {
+          sessionID: input.sessionID,
+          agent: input.agent,
+          overflow: input.overflow,
+        },
+        output: {
+          enabled: output.enabled,
+        },
+        timestamp: new Date().toISOString(),
+      });
+
+      // Apply config-based modifications
+      applyHookConfig('experimental.compaction.autocontinue', output, ohiConfig);
+    },
+
+    // Experimental text complete hook
+    "experimental.text.complete": async (input: any, output: any) => {
+      sendMessage({
+        type: 'hook_event',
+        hook: 'experimental.text.complete',
+        input: {
+          sessionID: input.sessionID,
+          messageID: input.messageID,
+          partID: input.partID,
+        },
+        output: {
+          textLength: output.text?.length || 0,
+          textPreview: output.text?.substring(0, 100),
+        },
+        timestamp: new Date().toISOString(),
+      });
+
+      // Apply config-based modifications
+      applyHookConfig('experimental.text.complete', output, ohiConfig);
+    },
   };
 };
+
+// Re-export config functions for testing
+export { loadConfig, applyHookConfig } from './config.js';

@@ -20,7 +20,10 @@
   "scripts": {
     "build": "tsup",
     "prepublishOnly": "npm run build",
-    "postinstall": "node scripts/postinstall.cjs"
+    "postinstall": "node scripts/postinstall.cjs",
+    "test:config": "tsx scripts/test-config.ts",
+    "test:permission": "tsx scripts/test-permission.ts",
+    "test": "npm run test:config && npm run test:permission once && npm run test:permission always && npm run test:permission reject"
   },
   "keywords": [
     "opencode",
@@ -33,6 +36,7 @@
   "devDependencies": {
     "@types/node": "^20.11.0",
     "tsup": "^8.0.0",
+    "tsx": "^4.21.0",
     "typescript": "^5.3.0"
   },
   "dependencies": {

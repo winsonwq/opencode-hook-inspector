@@ -25,6 +25,11 @@ ${chalk.cyan('Usage:')}
   ${chalk.green('ohi')}              Start inspector
   ${chalk.green('ohi unlink')}        Remove plugin from opencode
   ${chalk.green('ohi --help')}        Show this help
+
+${chalk.cyan('Configuration:')}
+  ${chalk.gray('~/.ohi/config.json')}   Global config (user home directory)
+  ${chalk.gray('./.ohi.json')}         Local config (current directory)
+  ${chalk.gray('./.ohi/config.json')}   Project config
 `);
 }
 

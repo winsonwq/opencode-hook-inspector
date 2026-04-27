@@ -1,0 +1,21 @@
+{
+  "version": "1.0",
+  "hooks": {
+    "chat.params": {
+      "temperature": 0.7,
+      "topP": 0.9
+    },
+    "experimental.session.compacting": {
+      "context": [
+        "You are a helpful coding assistant.",
+        "Always write clean, well-documented code."
+      ]
+    },
+    "experimental.chat.system.transform": {
+      "system": [
+        "You are a coding expert.",
+        "When writing code, always include comments explaining the logic."
+      ]
+    }
+  }
+}
