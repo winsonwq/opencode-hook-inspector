@@ -10,7 +10,7 @@ function debugLog(...args: unknown[]) {
   const timestamp = new Date().toISOString();
   const line = `[${timestamp}] ${msg}\n`;
   fs.appendFileSync(DEBUG_FILE, line);
-  console.log(...args);
+  // Don't console.log here - it would pollute OpenCode's UI
 }
 
 interface IPCMessage {
