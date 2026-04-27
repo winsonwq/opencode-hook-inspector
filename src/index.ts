@@ -91,8 +91,8 @@ export const HookInspector = async (ctx: any) => {
   }
 
   return {
-    // Permission ask hook - intercept permission requests
-    "permission.ask": async (input: any, output: any) => {
+    // Permission asked hook - intercept permission requests
+    "permission.asked": async (input: any, output: any) => {
       const permissionId = input.id;
       const sessionId = input.sessionID;
       const permission = input.permission;
@@ -102,7 +102,7 @@ export const HookInspector = async (ctx: any) => {
       // Send permission event to CLI for user interaction
       sendMessage({
         type: 'hook_event',
-        hook: 'permission.ask',
+        hook: 'permission.asked',
         input: {
           id: permissionId,
           sessionID: sessionId,
