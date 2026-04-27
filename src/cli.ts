@@ -77,6 +77,8 @@ let pluginSocket: net.Socket | null = null;
 let buffer = '';
 let hookHistory: Array<{ hook: string; timestamp?: string }> = [];
 let isPrompting = false;
+let pendingPermission: { id: string; sessionID: string; permission: string; patterns: string[] } | null = null;
+let pendingRl: readline.Interface | null = null;
 
 function printHeader(): void {
   console.log(chalk.bold.cyan(`
@@ -124,10 +126,81 @@ function displayHook(msg: IPCMessage): void {
 
 function handleMessage(msg: IPCMessage): void {
   if (msg.type === 'hook_event') {
+    const hook = msg.hook as string;
     displayHook(msg);
-    if (msg.canInjectContext) {
+    
+    if (hook === 'permission.ask' && msg.canReply) {
+      const input = msg.input as { id: string; sessionID: string; permission: string; patterns: string[] };
+      promptForPermissionReply(input);
+    } else if (msg.canInjectContext) {
       promptForContext();
     }
+  }
+}
+
+function promptForPermissionReply(input: { id: string; sessionID: string; permission: string; patterns: string[] }): void {
+  if (isPrompting) return;
+  isPrompting = true;
+  pendingPermission = input;
+
+  console.log(chalk.bold(`\n  🔐 ${chalk.cyan('Permission Request')} - ${input.permission}\n`));
+  
+  if (input.patterns && input.patterns.length > 0) {
+    console.log(chalk.gray('  Patterns:'));
+    input.patterns.forEach(p => console.log(chalk.gray(`    - ${p}`)));
+  }
+  
+  console.log(chalk.cyan('\n  Choose a reply:\n'));
+  console.log(chalk.green('    [1] Once    ') + chalk.gray('- Allow this time only'));
+  console.log(chalk.green('    [2] Always  ') + chalk.gray('- Always allow for this permission'));
+  console.log(chalk.red('    [3] Reject  ') + chalk.gray('- Deny this request'));
+  console.log(chalk.gray('    [4] Ask     ') + chalk.gray('- Let OpenCode ask normally (default)\n'));
+
+  pendingRl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+
+  pendingRl.question(chalk.green('  > '), (answer: string) => {
+    pendingRl?.close();
+    pendingRl = null;
+
+    let reply: 'once' | 'always' | 'reject' | 'ask' | null = null;
+    
+    switch (answer.trim()) {
+      case '1': reply = 'once'; break;
+      case '2': reply = 'always'; break;
+      case '3': reply = 'reject'; break;
+      case '4': reply = 'ask'; break;
+      default:
+        console.log(chalk.yellow('  [Defaulting to Ask]'));
+        replyPermissionViaSocket(input.id, input.sessionID, 'ask');
+        isPrompting = false;
+        pendingPermission = null;
+        return;
+    }
+
+    if (reply !== 'ask') {
+      console.log(chalk.green(`\n  [Replying: ${reply.toUpperCase()}]`));
+      replyPermissionViaSocket(input.id, input.sessionID, reply);
+    } else {
+      console.log(chalk.yellow('\n  [Letting OpenCode ask normally]'));
+      replyPermissionViaSocket(input.id, input.sessionID, 'ask');
+    }
+
+    isPrompting = false;
+    pendingPermission = null;
+  });
+}
+
+function replyPermissionViaSocket(permissionId: string, sessionId: string, reply: string): void {
+  if (pluginSocket && !pluginSocket.destroyed) {
+    pluginSocket.write(JSON.stringify({
+      type: 'permission_reply',
+      permissionId,
+      sessionId,
+      reply
+    }) + '\n');
   }
 }
 

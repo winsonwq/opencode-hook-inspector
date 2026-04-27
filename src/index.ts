@@ -15,8 +15,12 @@ let socket: net.Socket | null = null;
 let buffer = '';
 let pendingContext: string[] = [];
 
+// Pending permission replies: permissionId -> { sessionId, chosen }
+let pendingPermissionReplies: Map<string, { sessionId: string; chosen: string }> = new Map();
+
 // Named export
 export const HookInspector = async (ctx: any) => {
+  const { client } = ctx;
 
   // Connect to Unix socket
   function connect(): Promise<net.Socket> {
@@ -34,6 +38,13 @@ export const HookInspector = async (ctx: any) => {
               // Handle inject_context from inspector
               if (msg.type === 'inject_context' && msg.text) {
                 pendingContext.push(msg.text);
+              }
+              // Handle permission reply from inspector
+              if (msg.type === 'permission_reply' && msg.permissionId && msg.reply) {
+                pendingPermissionReplies.set(msg.permissionId, {
+                  sessionId: msg.sessionId,
+                  chosen: msg.reply
+                });
               }
             } catch {
               // Ignore
@@ -67,10 +78,71 @@ export const HookInspector = async (ctx: any) => {
     }
   }
 
+  // Helper to reply to permission via client API
+  async function replyPermission(sessionId: string, permissionId: string, reply: 'once' | 'always' | 'reject') {
+    try {
+      await client.postSessionIdPermissionsPermissionId({
+        path: { id: sessionId, permissionID: permissionId },
+        body: { response: reply }
+      });
+    } catch (err) {
+      console.error('Failed to reply permission:', err);
+    }
+  }
+
   return {
+    // Permission ask hook - intercept permission requests
+    "permission.ask": async (input: any, output: any) => {
+      const permissionId = input.id;
+      const sessionId = input.sessionID;
+      const permission = input.permission;
+      const patterns = input.patterns || [];
+      const always = input.always || [];
+
+      // Send permission event to CLI for user interaction
+      sendMessage({
+        type: 'hook_event',
+        hook: 'permission.ask',
+        input: {
+          id: permissionId,
+          sessionID: sessionId,
+          permission,
+          patterns,
+          always,
+        },
+        canReply: true,
+        timestamp: new Date().toISOString(),
+      });
+
+      // Check if user already replied via CLI
+      const pending = pendingPermissionReplies.get(permissionId);
+      if (pending) {
+        pendingPermissionReplies.delete(permissionId);
+        
+        // Call client API to reply
+        const reply = pending.chosen as 'once' | 'always' | 'reject';
+        await replyPermission(sessionId, permissionId, reply);
+        
+        // Set output status based on reply
+        if (reply === 'reject') {
+          output.status = 'deny';
+        } else {
+          output.status = 'allow';
+        }
+        return;
+      }
+
+      // No reply yet - set status to 'ask' (default behavior, will show UI)
+      output.status = 'ask';
+    },
+
     // Generic event handler - catches all events
     event: async ({ event }: { event: any }) => {
       const hookName = event?.type || 'unknown';
+      
+      // Skip permission.ask here since we handle it in the dedicated hook
+      if (hookName === 'permission.ask') return;
+      
       sendMessage({
         type: 'hook_event',
         hook: hookName,
