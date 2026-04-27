@@ -3,7 +3,7 @@
  * CLI entry point for OHI - Opencode Hook Inspector
  */
 
-import { existsSync, symlinkSync, unlinkSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, unlinkSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import readline from 'readline';
@@ -33,7 +33,6 @@ interface IPCMessage {
   [key: string]: unknown;
 }
 
-// Unlink plugin from opencode
 function unlink(): void {
   const xdgConfigHome = process.env.XDG_CONFIG_HOME || resolve(process.env.HOME || '~', '.config');
   const opencodeDir = resolve(xdgConfigHome, 'opencode');
@@ -77,6 +76,7 @@ let pluginSocket: net.Socket | null = null;
 let buffer = '';
 let hookHistory: Array<{ hook: string; timestamp?: string }> = [];
 let isPrompting = false;
+let pendingRl: readline.Interface | null = null;
 
 function printHeader(): void {
   console.log(chalk.bold.cyan(`
@@ -124,9 +124,75 @@ function displayHook(msg: IPCMessage): void {
 
 function handleMessage(msg: IPCMessage): void {
   if (msg.type === 'hook_event') {
+    const hook = msg.hook as string;
     displayHook(msg);
+    
+    // Handle permission.ask with interactive reply
+    if (hook === 'permission.asked' && msg.canReply) {
+      const input = msg.input as { permissionId: string; sessionId: string; permission: string; patterns: string[] };
+      promptForPermissionReply(input);
+    } else if (msg.canInjectContext) {
+      promptForContext();
+    }
   }
 }
+
+function promptForPermissionReply(input: { permissionId: string; sessionId: string; permission: string; patterns: string[] }): void {
+  if (isPrompting) return;
+  isPrompting = true;
+
+  console.log(chalk.bold(`\n  🔐 ${chalk.cyan('Permission Request')} - ${input.permission}\n`));
+  
+  if (input.patterns && input.patterns.length > 0) {
+    console.log(chalk.gray('  Patterns:'));
+    input.patterns.forEach((p: string) => console.log(chalk.gray(`    - ${p}`)));
+  }
+  
+  console.log(chalk.cyan('\n  Choose a reply:\n'));
+  console.log(chalk.green('    [1] Once    ') + chalk.gray('- Allow this time only'));
+  console.log(chalk.green('    [2] Always  ') + chalk.gray('- Always allow for this permission'));
+  console.log(chalk.red('    [3] Reject  ') + chalk.gray('- Deny this request'));
+  console.log(chalk.gray('    [4] Ask     ') + chalk.gray('- Let OpenCode ask normally (default)\n'));
+
+  pendingRl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+
+  pendingRl.question(chalk.green('  > '), (answer: string) => {
+    pendingRl?.close();
+    pendingRl = null;
+
+    let reply: string = 'ask';
+    
+    switch (answer.trim()) {
+      case '1': reply = 'once'; break;
+      case '2': reply = 'always'; break;
+      case '3': reply = 'reject'; break;
+      case '4': reply = 'ask'; break;
+      default:
+        console.log(chalk.yellow('  [Defaulting to Ask]'));
+        break;
+    }
+
+    console.log(chalk.green(`\n  [Replying: ${reply.toUpperCase()}]`));
+    sendPermissionReply(input.permissionId, input.sessionId, reply);
+
+    isPrompting = false;
+  });
+}
+
+function sendPermissionReply(permissionId: string, sessionId: string, reply: string): void {
+  if (pluginSocket && !pluginSocket.destroyed) {
+    pluginSocket.write(JSON.stringify({
+      type: 'permission_reply',
+      permissionId,
+      sessionId,
+      reply
+    }) + '\n');
+  }
+}
+
 function promptForContext(): void {
   if (isPrompting) return;
   isPrompting = true;
@@ -197,7 +263,6 @@ function handleClient(socket: net.Socket): void {
 }
 
 async function startServer(): Promise<void> {
-  // Remove existing socket
   try {
     if (existsSync(SOCKET_PATH)) {
       unlinkSync(SOCKET_PATH);
@@ -235,10 +300,7 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  // Start server
   await startServer();
-
-  // Keep running
   await new Promise(() => {});
 }
 

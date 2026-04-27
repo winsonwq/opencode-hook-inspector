@@ -10,7 +10,6 @@ function debugLog(...args: unknown[]) {
   const timestamp = new Date().toISOString();
   const line = `[${timestamp}] ${msg}\n`;
   fs.appendFileSync(DEBUG_FILE, line);
-  // Don't console.log here - it would pollute OpenCode's UI
 }
 
 interface IPCMessage {
@@ -18,39 +17,30 @@ interface IPCMessage {
   [key: string]: any;
 }
 
-// Plugin state
 let socket: net.Socket | null = null;
 let buffer = '';
 let pendingContext: string[] = [];
-
-// Connection ready promise
 let connectionReady: Promise<net.Socket | null> | null = null;
 
-// Pending permission replies: permissionId -> { sessionId, chosen }
-// TODO: Fix this - the permission option selection is not working correctly
-// The issue is that canReply is undefined when CLI receives the message
 let pendingPermissionReplies: Map<string, { sessionId: string; chosen: string }> = new Map();
 
-// Handle incoming permission replies
 function handlePermissionReply(msg: IPCMessage) {
-  const { permissionId, reply } = msg;
-  debugLog(`[OHI] Received permission_reply: permissionId=${permissionId}, reply=${reply}`);
+  const { permissionId, reply, sessionId } = msg;
+  debugLog(`[OHI] Received permission_reply: permissionId=${permissionId}, reply=${reply}, sessionId=${sessionId}`);
   
   pendingPermissionReplies.set(permissionId, {
-    sessionId: msg.sessionId,
+    sessionId: msg.sessionId || sessionId,
     chosen: reply
   });
 }
 
-// Named export
 export const HookInspector = async (_ctx: any) => {
 
-  // Connect to Unix socket
   function connect(): Promise<net.Socket> {
     return new Promise((resolve, reject) => {
       const sock = net.createConnection(SOCKET_PATH, () => {
         socket = sock;
-        socket.on('data', (data) => {
+        sock.on('data', (data) => {
           buffer += data.toString();
           const lines = buffer.split('\n');
           buffer = lines.pop() || '';
@@ -58,54 +48,45 @@ export const HookInspector = async (_ctx: any) => {
             if (!line.trim()) continue;
             try {
               const msg: IPCMessage = JSON.parse(line);
-              // Handle inject_context from inspector
               if (msg.type === 'inject_context' && msg.text) {
                 pendingContext.push(msg.text);
               }
-              // Handle permission reply from inspector
-              // TODO: Enable when the permission option issue is fixed
-              // if (msg.type === 'permission_reply' && msg.permissionId && msg.reply) {
-              //   handlePermissionReply(msg);
-              // }
+              if (msg.type === 'permission_reply' && msg.permissionId && msg.reply) {
+                handlePermissionReply(msg);
+              }
             } catch {
               // Ignore
             }
           }
         });
-        socket.on('error', () => {
-          socket = null;
-        });
-        socket.on('close', () => {
-          socket = null;
-        });
+        sock.on('error', () => { socket = null; });
+        sock.on('close', () => { socket = null; });
         resolve(sock);
       });
-      sock.on('error', () => {
-        socket = null;
-        reject(new Error('Connection failed'));
-      });
+      sock.on('error', () => { socket = null; reject(new Error('Connection failed')); });
     });
   }
 
-  // Start connection (non-blocking but track readiness)
   connectionReady = connect().catch(() => null);
 
-  // Helper to send message to socket (waits for connection)
   async function sendMessage(msg: IPCMessage) {
-    debugLog(`[OHI] sendMessage called, socket=${socket ? 'exists' : 'null'}, destroyed=${socket?.destroyed}`);
     await connectionReady;
-    debugLog(`[OHI] after connectionReady, socket=${socket ? 'exists' : 'null'}`);
     if (socket && !socket.destroyed) {
-      const json = JSON.stringify(msg);
-      socket.write(json + '\n');
-    } else {
-      debugLog(`[OHI] sendMessage: socket not available, message not sent`);
+      socket.write(JSON.stringify(msg) + '\n');
     }
   }
+
   return {
-    // Generic event handler - catches all events
+    // Generic event handler - catches all events EXCEPT permission.asked
+    // (permission.asked has its own dedicated hook)
     event: async ({ event }: { event: any }) => {
       const hookName = event?.type || 'unknown';
+      
+      // Skip permission.asked - let the dedicated hook handle it
+      if (hookName === 'permission.asked') {
+        debugLog('[OHI] event hook: skipping permission.asked (dedicated hook will handle)');
+        return;
+      }
 
       sendMessage({
         type: 'hook_event',
@@ -115,7 +96,6 @@ export const HookInspector = async (_ctx: any) => {
       });
     },
 
-    // Shell env hook - can modify environment variables
     "shell.env": async (input: any, output: any) => {
       sendMessage({
         type: 'hook_event',
@@ -126,11 +106,7 @@ export const HookInspector = async (_ctx: any) => {
       });
     },
 
-    // Tool execute before - can modify tool arguments or block execution
     "tool.execute.before": async (input: any, output: any) => {
-      const { tool, args } = input;
-      debugLog(`[OHI] tool.execute.before: tool=${tool}`);
-      
       sendMessage({
         type: 'hook_event',
         hook: 'tool.execute.before',
@@ -140,7 +116,6 @@ export const HookInspector = async (_ctx: any) => {
       });
     },
 
-    // Compaction hook - can inject context
     "experimental.session.compacting": async (input: any, output: any) => {
       const contextLength = output.context?.length || 0;
 
@@ -153,7 +128,6 @@ export const HookInspector = async (_ctx: any) => {
         timestamp: new Date().toISOString(),
       });
 
-      // Inject pending context into the session
       if (pendingContext.length > 0 && output.context) {
         for (const text of pendingContext) {
           output.context.push(`## Inspector Injection\n${text}`);
@@ -162,68 +136,70 @@ export const HookInspector = async (_ctx: any) => {
       }
     },
 
-    // Permission asked hook - logs permission events
-    // TODO: Enable user interaction when the canReply issue is fixed
-    // The problem is that canReply is undefined when CLI receives the message
-    // Possible causes:
-    // 1. OpenCode may not be calling both 'event' and 'permission.asked' hooks
-    // 2. The message format may not include canReply field correctly
-    // 3. Socket communication timing issue
+    // Permission asked hook - intercept and allow user to reply via CLI
     "permission.asked": async (input: any, output: any) => {
       const props = input?.properties || input;
       const permissionId = props?.id;
       const permissionType = props?.permission;
-      const patterns = props?.patterns;
+      const patterns = props?.patterns || [];
       const metadata = props?.metadata || {};
-      const filepath = metadata?.filepath || (Array.isArray(patterns) ? patterns[0] : patterns);
       const sessionId = props?.sessionID;
-      debugLog(`[OHI] permission.asked hook called (id=${permissionId}, type=${permissionType}, filepath=${filepath})`);
       
+      debugLog(`[OHI] permission.asked: id=${permissionId}, type=${permissionType}, sessionId=${sessionId}`);
+      
+      // Send message to CLI with canReply flag
       sendMessage({
-        type: "hook_event",
-        hook: "permission.asked",
-        input,
-        canReply: true, // TODO: This is not being received correctly by CLI
-        permission: permissionType,
-        permissionId,
-        sessionId,
-        timestamp: new Date().toISOString()
+        type: 'hook_event',
+        hook: 'permission.asked',
+        input: {
+          permissionId,
+          sessionId,
+          permission: permissionType,
+          patterns,
+          metadata,
+        },
+        canReply: true,
+        timestamp: new Date().toISOString(),
       });
+
+      // Wait for reply from CLI (up to 60 seconds)
+      const timeoutMs = 60000;
+      const startTime = Date.now();
       
-      // TODO: Enable when canReply issue is fixed
-      // Currently letting OpenCode handle permissions normally
-      // while (Date.now() - startTime < timeoutMs) {
-      //   const reply = pendingPermissionReplies.get(permissionId);
-      //   if (reply) {
-      //     pendingPermissionReplies.delete(permissionId);
-      //     debugLog(`[OHI] permission.asked: got reply=${reply.chosen} for id=${permissionId}`);
-      //     switch (reply.chosen) {
-      //       case "1":
-      //       case "once":
-      //         output.status = "allow";
-      //         break;
-      //       case "2":
-      //       case "always":
-      //         output.status = "allow";
-      //         break;
-      //       case "3":
-      //       case "reject":
-      //         output.status = "deny";
-      //         break;
-      //       case "4":
-      //       case "ask":
-      //         output.status = "ask";
-      //         break;
-      //       default:
-      //         break;
-      //     }
-      //     debugLog(`[OHI] permission.asked: output.status set to ${output.status}`);
-      //     break;
-      //   }
-      //   await new Promise((resolve) => setTimeout(resolve, 100));
-      // }
+      while (Date.now() - startTime < timeoutMs) {
+        const reply = pendingPermissionReplies.get(permissionId);
+        if (reply) {
+          pendingPermissionReplies.delete(permissionId);
+          debugLog(`[OHI] permission.asked: got reply=${reply.chosen} for id=${permissionId}`);
+          
+          switch (reply.chosen) {
+            case '1':
+            case 'once':
+              output.status = 'allow';
+              break;
+            case '2':
+            case 'always':
+              output.status = 'allow';
+              break;
+            case '3':
+            case 'reject':
+              output.status = 'deny';
+              break;
+            case '4':
+            case 'ask':
+            default:
+              output.status = 'ask';
+              break;
+          }
+          
+          debugLog(`[OHI] permission.asked: output.status set to ${output.status}`);
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
       
-      // Let OpenCode handle permissions normally for now
+      debugLog('[OHI] permission.asked: timeout waiting for reply, letting OpenCode handle');
+      output.status = 'ask';
     },
   };
 };
