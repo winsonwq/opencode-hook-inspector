@@ -127,10 +127,12 @@ function handleMessage(msg: IPCMessage): void {
     const hook = msg.hook as string;
     displayHook(msg);
     
-    // Handle permission.ask with interactive reply
+    // Handle permission.asked with interactive reply
     if (hook === 'permission.asked' && msg.canReply) {
       const input = msg.input as { permissionId: string; sessionId: string; permission: string; patterns: string[] };
-      promptForPermissionReply(input);
+      if (input?.permissionId) {
+        promptForPermissionReply(input);
+      }
     } else if (msg.canInjectContext) {
       promptForContext();
     }

@@ -23,18 +23,86 @@ let pendingContext: string[] = [];
 let connectionReady: Promise<net.Socket | null> | null = null;
 
 let pendingPermissionReplies: Map<string, { sessionId: string; chosen: string }> = new Map();
+let pendingPermissionRequests: Set<string> = new Set();
+let opencodeClient: any = null;
 
-function handlePermissionReply(msg: IPCMessage) {
+async function handlePermissionReply(msg: IPCMessage) {
   const { permissionId, reply, sessionId } = msg;
   debugLog(`[OHI] Received permission_reply: permissionId=${permissionId}, reply=${reply}, sessionId=${sessionId}`);
-  
+
   pendingPermissionReplies.set(permissionId, {
     sessionId: msg.sessionId || sessionId,
     chosen: reply
   });
+
+  // If this permission was requested by us, send API reply immediately
+  if (pendingPermissionRequests.has(permissionId) && opencodeClient) {
+    pendingPermissionRequests.delete(permissionId);
+    debugLog(`[OHI] Sending permission reply via API: ${reply} for ${permissionId}, sessionId=${sessionId}`);
+    try {
+      await opencodeClient.postSessionIdPermissionsPermissionId({
+        path: { id: sessionId, permissionID: permissionId },
+        body: { response: reply }
+      });
+      debugLog(`[OHI] API reply sent successfully`);
+    } catch (err) {
+      debugLog(`[OHI] API reply failed: ${err}`);
+    }
+  }
+}
+
+function extractPermissionPayload(input: any) {
+  const props = input?.properties || input || {};
+  return {
+    permissionId: props?.id || props?.permissionId,
+    permissionType: props?.permission || props?.type,
+    patterns: props?.patterns || [],
+    metadata: props?.metadata || {},
+    sessionId: props?.sessionId || props?.sessionID,
+  };
+}
+
+async function waitForPermissionReply(permissionId: string): Promise<string | null> {
+  const timeoutMs = 60000;
+  const startTime = Date.now();
+
+  while (Date.now() - startTime < timeoutMs) {
+    const reply = pendingPermissionReplies.get(permissionId);
+    if (reply) {
+      pendingPermissionReplies.delete(permissionId);
+      return reply.chosen;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  return null;
+}
+
+function applyPermissionStatus(output: any, chosen: string) {
+  switch (chosen) {
+    case '1':
+    case 'once':
+      output.status = 'allow';
+      break;
+    case '2':
+    case 'always':
+      output.status = 'allow';
+      break;
+    case '3':
+    case 'reject':
+      output.status = 'deny';
+      break;
+    case '4':
+    case 'ask':
+    default:
+      output.status = 'ask';
+      break;
+  }
 }
 
 export const HookInspector = async (_ctx: any) => {
+  // Capture client for API calls
+  opencodeClient = _ctx?.client;
 
   function connect(): Promise<net.Socket> {
     return new Promise((resolve, reject) => {
@@ -77,14 +145,51 @@ export const HookInspector = async (_ctx: any) => {
   }
 
   return {
-    // Generic event handler - catches all events EXCEPT permission.asked
-    // (permission.asked has its own dedicated hook)
+    // Generic event handler - catches all events
     event: async ({ event }: { event: any }) => {
       const hookName = event?.type || 'unknown';
-      
-      // Skip permission.asked - let the dedicated hook handle it
+
+      // For permission.asked, extract and normalize the data
       if (hookName === 'permission.asked') {
-        debugLog('[OHI] event hook: skipping permission.asked (dedicated hook will handle)');
+        const props = event?.properties || event || {};
+        const permissionId = props?.id;
+        const sessionId = props?.sessionId || props?.sessionID;
+
+        // Mark this as a pending request so we can reply when CLI sends reply
+        if (permissionId) {
+          pendingPermissionRequests.add(permissionId);
+        }
+
+        sendMessage({
+          type: 'hook_event',
+          hook: hookName,
+          input: {
+            permissionId,
+            sessionId,
+            permission: props?.permission || props?.type,
+            patterns: props?.patterns || [],
+            metadata: props?.metadata || {},
+          },
+          canReply: true,
+          timestamp: new Date().toISOString(),
+        });
+
+        // Check if we already have a pending reply from CLI and send via API
+        const reply = pendingPermissionReplies.get(permissionId);
+        if (reply && opencodeClient && permissionId) {
+          pendingPermissionRequests.delete(permissionId);
+          pendingPermissionReplies.delete(permissionId);
+          debugLog(`[OHI] event: sending permission reply via API: ${reply.chosen} for ${permissionId}, sessionId=${sessionId}`);
+          try {
+            await opencodeClient.postSessionIdPermissionsPermissionId({
+              path: { id: sessionId, permissionID: permissionId },
+              body: { response: reply.chosen }
+            });
+            debugLog(`[OHI] event: API reply sent successfully`);
+          } catch (err) {
+            debugLog(`[OHI] event: API reply failed: ${err}`);
+          }
+        }
         return;
       }
 
@@ -136,18 +241,10 @@ export const HookInspector = async (_ctx: any) => {
       }
     },
 
-    // Permission asked hook - intercept and allow user to reply via CLI
+    // Permission asked event - observation only
     "permission.asked": async (input: any, output: any) => {
-      const props = input?.properties || input;
-      const permissionId = props?.id;
-      const permissionType = props?.permission;
-      const patterns = props?.patterns || [];
-      const metadata = props?.metadata || {};
-      const sessionId = props?.sessionID;
-      
-      debugLog(`[OHI] permission.asked: id=${permissionId}, type=${permissionType}, sessionId=${sessionId}`);
-      
-      // Send message to CLI with canReply flag
+      const { permissionId, permissionType, patterns, metadata, sessionId } = extractPermissionPayload(input);
+      debugLog(`[OHI] permission.asked(event): id=${permissionId}, type=${permissionType}, sessionId=${sessionId}`);
       sendMessage({
         type: 'hook_event',
         hook: 'permission.asked',
@@ -158,48 +255,49 @@ export const HookInspector = async (_ctx: any) => {
           patterns,
           metadata,
         },
-        canReply: true,
+        canReply: false,
+        timestamp: new Date().toISOString(),
+      });
+      output.status = 'ask';
+    },
+
+    // Permission ask hook - interception point for pause + injected response
+    "permission.ask": async (input: any, output: any) => {
+      const { permissionId, permissionType, patterns, metadata, sessionId } = extractPermissionPayload(input);
+      const canReply = Boolean(permissionId);
+
+      debugLog(`[OHI] permission.ask(hook): id=${permissionId}, type=${permissionType}, sessionId=${sessionId}, canReply=${canReply}`);
+
+      sendMessage({
+        type: 'hook_event',
+        hook: 'permission.ask',
+        input: {
+          permissionId,
+          sessionId,
+          permission: permissionType,
+          patterns,
+          metadata,
+        },
+        canReply,
         timestamp: new Date().toISOString(),
       });
 
-      // Wait for reply from CLI (up to 60 seconds)
-      const timeoutMs = 60000;
-      const startTime = Date.now();
-      
-      while (Date.now() - startTime < timeoutMs) {
-        const reply = pendingPermissionReplies.get(permissionId);
-        if (reply) {
-          pendingPermissionReplies.delete(permissionId);
-          debugLog(`[OHI] permission.asked: got reply=${reply.chosen} for id=${permissionId}`);
-          
-          switch (reply.chosen) {
-            case '1':
-            case 'once':
-              output.status = 'allow';
-              break;
-            case '2':
-            case 'always':
-              output.status = 'allow';
-              break;
-            case '3':
-            case 'reject':
-              output.status = 'deny';
-              break;
-            case '4':
-            case 'ask':
-            default:
-              output.status = 'ask';
-              break;
-          }
-          
-          debugLog(`[OHI] permission.asked: output.status set to ${output.status}`);
-          return;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 100));
+      if (!permissionId) {
+        debugLog('[OHI] permission.ask: missing permissionId, skip interactive reply');
+        output.status = 'ask';
+        return;
       }
-      
-      debugLog('[OHI] permission.asked: timeout waiting for reply, letting OpenCode handle');
-      output.status = 'ask';
+
+      const chosen = await waitForPermissionReply(permissionId);
+      if (!chosen) {
+        debugLog('[OHI] permission.ask: timeout waiting for reply, letting OpenCode handle');
+        output.status = 'ask';
+        return;
+      }
+
+      debugLog(`[OHI] permission.ask: got reply=${chosen} for id=${permissionId}`);
+      applyPermissionStatus(output, chosen);
+      debugLog(`[OHI] permission.ask: output.status set to ${output.status}`);
     },
   };
 };

@@ -51,6 +51,45 @@ opencode
 
 注入的上下文会被添加到 OpenCode 的 context 数组中，影响后续的对话。
 
+### Permission 交互控制
+
+当 `permission.asked` 事件触发时，可以控制权限请求的响应：
+
+```
+[15:21:00] [HOOK] [permission.asked] CALLED
+  🔐 Permission Request - external_directory
+
+  Patterns:
+    - /Users/aqiu/Downloads/*
+
+  Choose a reply:
+
+    [1] Once    - Allow this time only
+    [2] Always  - Always allow for this permission
+    [3] Reject  - Deny this request
+    [4] Ask     - Let OpenCode ask normally (default)
+
+  > 1
+  [Replying: ONCE]
+```
+
+#### 技术实现细节
+
+**关键发现**：`event` hook 接收的 `permission.asked` 事件只有观察性质，无法直接修改 `output.status`。
+
+OHI 通过以下方式实现控制：
+1. 捕获 `permission.asked` 事件并通过 Unix Socket 转发给 CLI
+2. 用户选择后，CLI 发送 `permission_reply` 消息
+3. Plugin 收到后，调用 OpenCode Client API (`POST /session/{id}/permissions/{permissionID}`) 发送回复
+
+```typescript
+// API 调用方式
+await opencodeClient.postSessionIdPermissionsPermissionId({
+  path: { id: sessionId, permissionID: permissionId },
+  body: { response: reply }  // "once" | "always" | "reject"
+});
+```
+
 ## Hook 参考
 
 ### 支持注入上下文的 Hooks
@@ -67,7 +106,14 @@ opencode
 | `shell.env` | Shell 环境变量 |
 | `tool.execute.before` | 工具执行前 |
 
-> **注意**：OpenCode 大部分 hooks 只提供只读的 Input 信息，不支持反向修改。只有 `experimental.session.compacting` 支持通过修改 `output.context` 来注入上下文。
+### Permission Hooks
+
+| Hook | 类型 | 说明 |
+|------|------|------|
+| `permission.asked` | SSE 事件 (via `event` hook) | 权限请求事件（仅观察） |
+| `permission.ask` | Dedicated Hook | 权限拦截 hook（OpenCode 暂未调用） |
+
+> **注意**：`event` hook 只能观察事件，无法修改 `output`。通过 CLI + OpenCode Client API 方式实现交互控制。
 
 ## 命令
 
