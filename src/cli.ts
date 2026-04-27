@@ -154,6 +154,21 @@ function promptForPermissionReply(input: { permissionId: string; sessionId: stri
   console.log(chalk.red('    [3] Reject  ') + chalk.gray('- Deny this request'));
   console.log(chalk.gray('    [4] Ask     ') + chalk.gray('- Let OpenCode ask normally (default)\n'));
 
+  // Test mode: auto-reply after delay (for testing without user input)
+  // Usage: OHI_AUTO_REPLY=1 OHI_AUTO_REPLY_OPTION=once ./bin/cli.js
+  const autoReply = process.env.OHI_AUTO_REPLY;
+  const autoReplyOption = process.env.OHI_AUTO_REPLY_OPTION || 'once';
+  
+  if (autoReply) {
+    console.log(chalk.gray(`  [AUTO-REPLY MODE: ${autoReplyOption}]\n`));
+    setTimeout(() => {
+      console.log(chalk.green(`  [Auto-Replying: ${autoReplyOption.toUpperCase()}]`));
+      sendPermissionReply(input.permissionId, input.sessionId, autoReplyOption);
+      isPrompting = false;
+    }, 500);
+    return;
+  }
+
   pendingRl = readline.createInterface({
     input: process.stdin,
     output: process.stdout
