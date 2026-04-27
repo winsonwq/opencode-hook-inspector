@@ -1,4 +1,4 @@
-# OHI - Opencode Hook Inspector
+# OHI - OpenCode Hook Inspector
 
 实时监控和调试 OpenCode hooks 的交互式 CLI 工具。
 

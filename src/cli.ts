@@ -87,9 +87,9 @@ let currentPromptInfo: { type: string; input?: any } | null = null;  // Track cu
 
 function printHeader(): void {
   console.log(chalk.bold.cyan(`
-  ╔═══════════════════════════════════════════════════╗
-  ║       Opencode Hook Inspector                      ║
-  ╚═══════════════════════════════════════════════════╝`));
+  ╔════════════════════════════════════════════════╗
+  ║       OpenCode Hook Inspector                    ║
+  ╚════════════════════════════════════════════════╝`));
 }
 
 function displayHook(msg: IPCMessage): void {
