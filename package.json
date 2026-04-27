@@ -2,6 +2,10 @@
   "name": "opencode-hook-inspector",
   "version": "0.1.0",
   "description": "OHI - Monitor and debug OpenCode hooks with an interactive CLI",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/winsonwq/opencode-hook-inspector.git"
+  },
   "type": "module",
   "bin": {
     "ohi": "./bin/cli.js"
